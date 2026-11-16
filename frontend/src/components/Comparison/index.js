@@ -4,8 +4,8 @@ import {
   Grid, Card, CardContent, LinearProgress,
   Alert, CircularProgress, Divider, Avatar, Container,
   Table, TableBody, TableCell, TableContainer, TableHead, TableRow,
-  IconButton, Tooltip, Badge, Fade, Grow, Zoom, Slide,
-  useTheme, alpha, Collapse
+  Badge, Fade, Grow, Zoom, Slide,
+  useTheme, alpha, Collapse, Snackbar
 } from '@mui/material';
 import {
   Compare as CompareIcon,
@@ -36,6 +36,7 @@ import {
   PlayArrow as PlayArrowIcon
 } from '@mui/icons-material';
 import axios from 'axios';
+import { downloadComparisonPdf, copySummaryToClipboard } from '../../utils/comparisonReport';
 
 const Comparison = () => {
   const theme = useTheme();
@@ -46,6 +47,23 @@ const Comparison = () => {
   const [error, setError] = useState(null);
   const [activeTab, setActiveTab] = useState('overview');
   const [expandedServices, setExpandedServices] = useState({});
+  const [toast, setToast] = useState(null);
+
+  const handleDownload = () => {
+    try {
+      downloadComparisonPdf(result);
+    } catch (err) {
+      console.error(err);
+      setToast({ severity: 'error', message: 'Could not create the PDF report' });
+    }
+  };
+
+  const handleShare = async () => {
+    const ok = await copySummaryToClipboard(result);
+    setToast(ok
+      ? { severity: 'success', message: 'Summary copied — paste it into WhatsApp, Slack or email' }
+      : { severity: 'error', message: 'Could not copy the summary' });
+  };
 
   const handleCompare = async () => {
     if (!targetUrl.trim()) {
@@ -375,7 +393,7 @@ const Comparison = () => {
             }}
           >
             <Grid container alignItems="center" justifyContent="space-between" spacing={2}>
-              <Grid item xs={12} md={8}>
+              <Grid item xs={12} md={12}>
                 <Box display="flex" alignItems="center" gap={2}>
                   <Avatar 
                     sx={{ 
@@ -400,20 +418,6 @@ const Comparison = () => {
                       {result.target?.url}
                     </Typography>
                   </Box>
-                </Box>
-              </Grid>
-              <Grid item xs={12} md={4}>
-                <Box display="flex" gap={1} justifyContent={{ xs: 'flex-start', md: 'flex-end' }}>
-                  <Tooltip title="Download Report">
-                    <IconButton sx={{ bgcolor: '#f1f5f9', '&:hover': { bgcolor: '#e2e8f0' } }}>
-                      <DownloadIcon />
-                    </IconButton>
-                  </Tooltip>
-                  <Tooltip title="Share Results">
-                    <IconButton sx={{ bgcolor: '#f1f5f9', '&:hover': { bgcolor: '#e2e8f0' } }}>
-                      <ShareIcon />
-                    </IconButton>
-                  </Tooltip>
                 </Box>
               </Grid>
             </Grid>
@@ -896,6 +900,7 @@ const Comparison = () => {
               <Button 
                 variant="outlined" 
                 startIcon={<DownloadIcon />}
+                onClick={handleDownload}
                 sx={{ 
                   borderRadius: 3,
                   borderColor: '#e2e8f0',
@@ -908,6 +913,7 @@ const Comparison = () => {
               <Button 
                 variant="contained" 
                 startIcon={<ShareIcon />}
+                onClick={handleShare}
                 sx={{ 
                   borderRadius: 3,
                   background: 'linear-gradient(135deg, #6366f1, #8b5cf6)',
@@ -923,6 +929,19 @@ const Comparison = () => {
           </Paper>
         </Box>
       )}
+
+      <Snackbar
+        open={!!toast}
+        autoHideDuration={4000}
+        onClose={() => setToast(null)}
+        anchorOrigin={{ vertical: 'bottom', horizontal: 'center' }}
+      >
+        {toast ? (
+          <Alert severity={toast.severity} onClose={() => setToast(null)} variant="filled">
+            {toast.message}
+          </Alert>
+        ) : <span />}
+      </Snackbar>
     </Container>
   );
 };
