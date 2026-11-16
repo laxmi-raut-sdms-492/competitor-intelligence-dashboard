@@ -15,6 +15,7 @@ import Roadmap from './Roadmap';
 import AIInsights from './AIInsights';
 import CompetitorDetails from './CompetitorDetails';
 import IndustryAnalysis from './IndustryAnalysis';
+import { getSizeLabels } from '../../utils/companySize';
 
 const Dashboard = ({ analysis, cleanedData, techData, trendingTech, companyCount, totalTech }) => {
   // Loading state
@@ -37,6 +38,7 @@ const Dashboard = ({ analysis, cleanedData, techData, trendingTech, companyCount
 
   const kpiData = {
     companies: companyCount || 0,
+    companySizes: getSizeLabels(cleanedData),
     technologies: totalTech || 0,
     services: totalServices,
     clients: totalClients,

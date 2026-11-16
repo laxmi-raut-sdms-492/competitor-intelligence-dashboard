@@ -95,7 +95,7 @@ const KPICards = ({ data }) => {
       value: data.companies || 0, 
       icon: <BusinessIcon />, 
       color: '#6366f1',
-      subtitle: 'Total startups'
+      subtitle: data.companySizes || 'Total companies'
     },
     { 
       title: 'Technologies Identified', 

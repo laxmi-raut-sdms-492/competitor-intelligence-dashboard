@@ -3,11 +3,13 @@ Enhanced Scraper Agent - Improved filtering for services
 """
 
 import re
+import time
 import asyncio
-from typing import Dict, Any, List
+from datetime import datetime
+from typing import Dict, Any, List, Optional
 import requests
 from bs4 import BeautifulSoup
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 from .base_agent import BaseAgent
 
 class EnhancedScraperAgent(BaseAgent):
@@ -97,7 +99,11 @@ class EnhancedScraperAgent(BaseAgent):
         services_data = await self._find_and_scrape_page(url, ['services', 'solutions', 'what-we-do'])
         
         # 3. Try to find and scrape about page
-        about_data = await self._find_and_scrape_page(url, ['about', 'company', 'who-we-are'])
+        about_data = await self._find_and_scrape_page(url, ['about', 'about-us', 'company', 'who-we-are', 'our-story'])
+
+        # 4. Pages that often mention team size / founding (used only for company size)
+        careers_data = await self._find_and_scrape_page(url, ['careers', 'jobs', 'join-us'])
+        team_data = await self._find_and_scrape_page(url, ['team', 'our-team', 'people'])
         
         # Merge all text
         combined_text = " ".join([
@@ -123,7 +129,15 @@ class EnhancedScraperAgent(BaseAgent):
         
         # Extract founded year
         founded_year = self._extract_founded_year_clean(combined_text)
-        
+
+        # Classify company size (Startup / Small / Medium / Enterprise / Unknown)
+        size_text = " ".join([combined_text, careers_data.get('text', ''), team_data.get('text', '')])
+        wikidata = self._lookup_wikidata(company_name, url, home_data.get('title') or '')
+        if founded_year == "Unknown" and wikidata.get("founded_year"):
+            founded_year = wikidata["founded_year"]
+        team_count = self._count_team_members(team_data)
+        company_size = self._extract_company_size(size_text, founded_year, wikidata, team_count)
+
         # Extract industry
         industry = self._extract_industry_clean(combined_text)
         
@@ -135,6 +149,7 @@ class EnhancedScraperAgent(BaseAgent):
             "clients": {"names": clients[:15]},
             "about": about[:500],
             "founded_year": founded_year,
+            "company_size": company_size,
             "industry": industry[:10],
             "page_title": home_data.get('title', ''),
             "meta_description": home_data.get('description', '')
@@ -395,7 +410,7 @@ class EnhancedScraperAgent(BaseAgent):
     
     def _extract_founded_year_clean(self, text: str) -> str:
         patterns = [
-            r'(?:founded|established|since|Years of)\s+(\d{4})',
+            r'(?:founded|established|since|Years of)\s+(?:in\s+)?(\d{4})',
             r'(\d{4})\s*(?:founded|established)',
             r'est\.\s*(\d{4})'
         ]
@@ -403,9 +418,207 @@ class EnhancedScraperAgent(BaseAgent):
             matches = re.findall(pattern, text, re.IGNORECASE)
             if matches:
                 year = matches[0]
-                if 1900 <= int(year) <= 2025:
+                if 1900 <= int(year) <= datetime.now().year:
                     return year
         return "Unknown"
+
+    # A company founded within this many years counts as a Startup
+    STARTUP_MAX_AGE_YEARS = 10
+
+    @staticmethod
+    def _size_from_employees(employees: int) -> str:
+        if employees < 50:
+            return "Startup"
+        if employees < 200:
+            return "Small Business"
+        if employees < 1000:
+            return "Medium Business"
+        return "Enterprise"
+
+    def _extract_company_size(self, text: str, founded_year: str,
+                              wikidata: Optional[Dict] = None, team_count: int = 0) -> Dict[str, Any]:
+        """Classify the company by size. Rules are tried in order; first match wins:
+        1. Employee count stated on the website
+        2. Employee count from Wikidata (well-known companies)
+        3. Founded within the last STARTUP_MAX_AGE_YEARS years -> Startup
+           (founded year from website/Wikidata, else estimated from
+           "(c) 2015-2026" or "12+ years of experience")
+        4. Self-description keywords ("we are a startup", "offices in 40 countries")
+        5. People listed on the team page (only if founding year is unknown)
+        6. Otherwise Unknown
+        """
+        wikidata = wikidata or {}
+
+        # 1. Employee count on the website
+        employees = self._extract_employee_count(text)
+        if employees is not None:
+            return {"category": self._size_from_employees(employees), "employees": employees, "source": "employee_count"}
+
+        # 2. Employee count from Wikidata
+        if wikidata.get("employees"):
+            employees = wikidata["employees"]
+            return {"category": self._size_from_employees(employees), "employees": employees, "source": "wikidata"}
+
+        # 3. Founded year (stated, or estimated from other clues)
+        year = founded_year if founded_year and founded_year.isdigit() else self._estimate_founded_year(text)
+        if year:
+            age = datetime.now().year - int(year)
+            if 0 <= age <= self.STARTUP_MAX_AGE_YEARS:
+                return {"category": "Startup", "employees": None, "source": "founded_year"}
+
+        # 4. Keywords
+        if re.search(r"\b(?:we\s+are|we're|is)\s+an?\s+(?:[\w-]+\s+){0,2}start-?up\b", text, re.IGNORECASE):
+            return {"category": "Startup", "employees": None, "source": "keywords"}
+        global_presence = re.search(
+            r"(?:offices|presence|operations|locations)\s+in\s+(\d+)\+?\s+countries", text, re.IGNORECASE
+        )
+        if global_presence and int(global_presence.group(1)) >= 20:
+            return {"category": "Enterprise", "employees": None, "source": "keywords"}
+
+        # 5. Team page head-count (last resort: team pages often list only leaders)
+        if not year and team_count >= 3:
+            return {"category": self._size_from_employees(team_count), "employees": team_count, "source": "team_page"}
+
+        # 6. Nothing found
+        return {"category": "Unknown", "employees": None, "source": "none"}
+
+    def _estimate_founded_year(self, text: str) -> Optional[str]:
+        """Estimate founding year from indirect clues when it is not stated."""
+        this_year = datetime.now().year
+        # "(c) 2015-2026" / "Copyright 2015 - 2026"
+        match = re.search(r"(?:©|&copy;|\(c\)|copyright)\s*(?:copyright\s*)?(\d{4})\s*[-–]\s*(\d{4})", text, re.IGNORECASE)
+        if match and 1900 <= int(match.group(1)) < int(match.group(2)) <= this_year:
+            return match.group(1)
+        # "12+ years of experience"
+        match = re.search(r"(\d{1,3})\+?\s*years?\s+of\s+(?:experience|excellence|expertise|innovation|service)", text, re.IGNORECASE)
+        if match and 0 < int(match.group(1)) < 150:
+            return str(this_year - int(match.group(1)))
+        return None
+
+    def _count_team_members(self, team_data: Dict) -> int:
+        """Rough head-count from a team page: unique personal LinkedIn links or member cards."""
+        soup = team_data.get('soup') if team_data else None
+        if not soup:
+            return 0
+        title = (team_data.get('title') or '').lower()
+        if 'leadership' in title or 'board' in title:
+            return 0
+        linkedin = {a['href'].split('?')[0].rstrip('/') for a in soup.find_all('a', href=True)
+                    if 'linkedin.com/in/' in a['href']}
+        cards = soup.find_all(class_=re.compile(r'team[-_]?member|member[-_]?card|person[-_]?card|staff[-_]?member', re.I))
+        return max(len(linkedin), len(cards))
+
+    def _lookup_wikidata(self, company_name: str, url: str, page_title: str = '') -> Dict[str, Any]:
+        """Look up employee count and founding year on Wikidata (free, no API key).
+        Only accepts an entry whose official website matches this company's domain."""
+        result: Dict[str, Any] = {}
+        domain = urlparse(url).netloc.lower().removeprefix('www.')
+        if not domain:
+            return result
+        # Try the company name, then the page title ("Persistent Systems | ..."), then the domain ("deepai")
+        title_name = re.split(r'\s[|\-–—:]\s', page_title.strip())[0].strip() if page_title else ''
+        searches = [n for n in dict.fromkeys([company_name, title_name, domain.split('.')[0]])
+                    if n and n != "Unknown" and len(n) <= 60]
+        try:
+            # 1st: find the company by its official website address (works even if the site blocks us)
+            variants = '|'.join(f'P856={p}{w}{domain}{sl}' for p in ['https://', 'http://']
+                                for w in ['www.', ''] for sl in ['/', ''])
+            by_site = self._wikidata_get({"action": "query", "list": "search",
+                                          "srsearch": f'haswbstatement:"{variants}"', "srlimit": 5})
+            def candidate_lists():
+                yield [x["title"] for x in by_site.get("query", {}).get("search", [])]
+                # 2nd: search by name (only reached if the website lookup found no match)
+                for name in searches:
+                    found = self._wikidata_get({"action": "wbsearchentities", "search": name, "language": "en",
+                                                "type": "item", "limit": 5})
+                    yield [item["id"] for item in found.get("search", [])]
+
+            for ids in candidate_lists():
+                if not ids:
+                    continue
+                entities = self._wikidata_get({"action": "wbgetentities", "ids": "|".join(ids),
+                                               "props": "claims|sitelinks"}).get("entities", {})
+                for entity_id in ids:  # keep search ranking order
+                    claims = entities.get(entity_id, {}).get("claims", {})
+                    websites = [c["mainsnak"].get("datavalue", {}).get("value", "") for c in claims.get("P856", [])]
+                    if not any(domain in urlparse(w).netloc.lower() for w in websites if isinstance(w, str)):
+                        continue
+                    employees = self._latest_claim(claims.get("P1128", []))
+                    if employees:
+                        result["employees"] = int(float(employees["amount"]))
+                    else:
+                        wiki_title = entities[entity_id].get("sitelinks", {}).get("enwiki", {}).get("title")
+                        if wiki_title:
+                            result.update(self._wikipedia_employees(wiki_title))
+                    inception = self._latest_claim(claims.get("P571", []))
+                    if inception:
+                        result["founded_year"] = inception["time"][1:5]
+                    return result
+        except Exception as e:
+            self.log(f"Wikidata lookup failed for {domain}: {e}")
+        return result
+
+    def _wikipedia_employees(self, title: str) -> Dict[str, Any]:
+        """Read 'num_employees' from the English Wikipedia infobox."""
+        try:
+            resp = requests.get("https://en.wikipedia.org/w/api.php",
+                                params={"action": "parse", "page": title, "prop": "wikitext",
+                                        "section": 0, "format": "json"},
+                                headers={'User-Agent': 'CompetitorIntel/1.0 (competitor intelligence dashboard)'},
+                                timeout=8)
+            wikitext = resp.json().get("parse", {}).get("wikitext", {}).get("*", "")
+            line = re.search(r"\|\s*num_employees\s*=([^\n]*)", wikitext)
+            if line:
+                value = re.sub(r"\{\{[^{}|]*\|?|\}\}|<ref[^>]*/>|<ref.*?</ref>", " ", line.group(1))
+                number = re.search(r"(\d{1,3}(?:,\d{3})+|\d+)", value)
+                if number and int(number.group(1).replace(",", "")) > 0:
+                    return {"employees": int(number.group(1).replace(",", ""))}
+        except Exception as e:
+            self.log(f"Wikipedia lookup failed for {title}: {e}")
+        return {}
+
+    def _wikidata_get(self, params: Dict) -> Dict:
+        """GET the Wikidata API; on rate limit (HTTP 429) wait and retry once."""
+        headers = {'User-Agent': 'CompetitorIntel/1.0 (competitor intelligence dashboard)'}
+        params = {**params, "format": "json"}
+        for attempt in range(2):
+            resp = requests.get("https://www.wikidata.org/w/api.php", params=params, headers=headers, timeout=8)
+            if resp.status_code == 429 and attempt == 0:
+                wait = resp.headers.get("Retry-After", "")
+                time.sleep(min(int(wait), 10) if wait.isdigit() else 3)
+                continue
+            resp.raise_for_status()
+            return resp.json()
+        return {}
+
+    @staticmethod
+    def _latest_claim(claims: List[Dict]) -> Optional[Dict]:
+        """Pick the preferred value, else the one with the latest 'point in time' (P585)."""
+        claims = [c for c in claims if c.get("rank") != "deprecated" and c["mainsnak"].get("datavalue")]
+        if not claims:
+            return None
+        preferred = [c for c in claims if c.get("rank") == "preferred"]
+        if preferred:
+            return preferred[0]["mainsnak"]["datavalue"]["value"]
+        def when(c):
+            q = c.get("qualifiers", {}).get("P585", [])
+            return q[0].get("datavalue", {}).get("value", {}).get("time", "") if q else ""
+        return max(claims, key=when)["mainsnak"]["datavalue"]["value"]
+
+    def _extract_employee_count(self, text: str) -> Optional[int]:
+        """Find a stated employee count, e.g. 'team of 25', '500+ employees', '10,000 professionals'."""
+        number = r"(\d{1,3}(?:,\d{3})+|\d+)"
+        patterns = [
+            number + r"\s*\+?\s*(?:employees|staff|team\s+members|professionals)\b",
+            r"team\s+of\s+(?:over\s+|more\s+than\s+)?" + number,
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, text, re.IGNORECASE)
+            if match:
+                count = int(match.group(1).replace(",", ""))
+                if count > 0:
+                    return count
+        return None
     
     def _extract_industry_clean(self, text: str) -> List[str]:
         industries = []

@@ -9,6 +9,7 @@ import axios from 'axios';
 import CompanyDiscovery from './components/CompanyDiscovery';
 import Comparison from './components/Comparison';
 import Dashboard from './components/Dashboard';
+import { getSizeLabels } from './utils/companySize';
 
 // Icons
 import { 
@@ -172,7 +173,7 @@ function App() {
             <Box display="flex" alignItems="center" gap={1.5} mb={4}>
              
               <Typography variant="h6" sx={{ fontWeight: 700, fontSize: '16px' }}>
-                Startup Intel
+                Competitor Intel
               </Typography>
             </Box>
 
@@ -271,7 +272,7 @@ function App() {
                       Enter Competitor URLs
                     </Typography>
                     <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-                      One URL per line — Analyze startup competitors
+                      One URL per line — Analyze competitors
                     </Typography>
                     <TextField
                       fullWidth
@@ -341,7 +342,7 @@ function App() {
                     >
                       <Grid container spacing={2} sx={{ mb: 3 }}>
                         {[
-                          { title: 'Startups', value: analysis?.total_companies || 0, icon: <BusinessIcon />, color: '#6366f1' },
+                          { title: getSizeLabels(cleanedData) || 'Companies', value: analysis?.total_companies || 0, icon: <BusinessIcon />, color: '#6366f1' },
                           { title: 'Technologies', value: totalTech, icon: <CodeIcon />, color: '#8b5cf6' },
                           { title: 'Services', value: analysis?.service_analysis?.total_services || 0, icon: <SettingsIcon />, color: '#a855f7' },
                         ].map((stat, index) => (
@@ -474,7 +475,7 @@ function App() {
                       {cleanedData.length > 0 && (
                         <Box>
                           <Typography variant="h6" sx={{ fontWeight: 600, mb: 2 }}>
-                            🏢 Startup Analysis
+                            🏢 Company Analysis
                           </Typography>
                           <Grid container spacing={2}>
                             {cleanedData.map((company, index) => {
